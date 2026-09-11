@@ -48,6 +48,9 @@ const MODES = {
 let prefs = { names: ['', '', '', ''], decks: ['', '', '', ''], count: 2, words: 8, seconds: { relatives: 45, pair: 15, why: 20 }, mode: 'relatives', difficulty: 'hard' };
 try { const p = JSON.parse(localStorage.getItem('sheeesh.v3.prefs') || '{}'); if (typeof p.seconds !== 'object') delete p.seconds; if (!Array.isArray(p.decks)) delete p.decks; Object.assign(prefs, p); } catch (_) { /* fresh */ }
 const savePrefs = () => { try { localStorage.setItem('sheeesh.v3.prefs', JSON.stringify(prefs)); } catch (_) { /* ignore */ } };
+let recent = [];
+try { recent = JSON.parse(localStorage.getItem('sheeesh.recent') || '[]'); if (!Array.isArray(recent)) recent = []; } catch (_) { recent = []; }
+function remember(words) { recent = words.concat(recent.filter((w) => !words.includes(w))).slice(0, 80); try { localStorage.setItem('sheeesh.recent', JSON.stringify(recent)); } catch (_) { /* ignore */ } }
 const secsFor = () => prefs.seconds[prefs.mode] || MODES[prefs.mode].seconds[1];
 
 // ---------- state ----------
@@ -88,11 +91,11 @@ function toast(text, bad) {
 function makePair(card) {
   if (random() < 0.5) {
     const other = pick(card.family);
-    return { card, other, related: true, why: `${up(other)} is family. ${card.origin}` };
+    return { card, other, related: true, why: `${up(other)} is family${card.notes[other] ? `: ${card.notes[other]}` : ''}. ${card.story}` };
   }
   if (card.friends.length && random() < ((S.difficulty || prefs.difficulty) === 'expert' ? 0.9 : 0.6)) {
     const [other, note] = pick(card.friends);
-    return { card, other, related: false, why: `${up(other)} looks the part and isn't: ${note}. ${up(card.word)} is ${card.origin}` };
+    return { card, other, related: false, why: `${up(other)} looks the part and isn't: ${note}. ${card.story}` };
   }
   let stranger;
   let tries = 0;
@@ -101,7 +104,7 @@ function makePair(card) {
     tries += 1;
   } while ((stranger === card || stranger.family.some((f) => card.family.includes(f))) && tries < 20);
   const other = pick(stranger.family.concat([stranger.word]));
-  return { card, other, related: false, why: `${up(other)} belongs to ${up(stranger.word)}: ${stranger.origin} ${up(card.word)} is ${card.origin}` };
+  return { card, other, related: false, why: `${up(other)} belongs to ${up(stranger.word)}, ${stranger.origin} ${card.story}` };
 }
 function makeWhy(card) {
   const fakes = DECOYS[card.word] || [];
@@ -110,9 +113,11 @@ function makeWhy(card) {
 }
 
 // ---------- game flow ----------
+let lastGame = null; // the previous game's players and log, for the scoreboard after Play again
 function newGame() {
+  if (S && S.log && S.log.length) lastGame = { mode: S.mode, players: S.players, log: S.log, code: S.online ? S.online.code : '' };
   deadline = null;
-  S = { phase: 'lobby', mode: prefs.mode, players: [], deck: [], word: 0, card: null, item: null, turn: 0, plays: [], history: [], verdict: null };
+  S = { phase: 'lobby', mode: prefs.mode, players: [], deck: [], word: 0, card: null, item: null, turn: 0, plays: [], history: [], verdict: null, log: [] };
   render();
 }
 function startGame() {
@@ -129,7 +134,10 @@ const newPlayer = (i, name, deck) => ({ id: i, name: (name || '').trim() || `Pla
 // Easy leaves out the expert words; expert skips the easy ones.
 function buildDeck(mode, difficulty, words, players) {
   const levels = difficulty === 'easy' ? [1, 2] : difficulty === 'expert' ? [2, 3] : [1, 2, 3];
-  const ladder = (cat) => [].concat(...levels.map((l) => shuffle(FAMILIES.filter((c) => c.level === l && (!cat || c.cat === cat)))));
+  // within each level the words you haven't seen lately come first, so a deck lasts many games before it repeats
+  const unseen = (l, cat) => shuffle(FAMILIES.filter((c) => c.level === l && (!cat || c.cat === cat) && !recent.includes(c.word)));
+  const seen = (l, cat) => shuffle(FAMILIES.filter((c) => c.level === l && (!cat || c.cat === cat) && recent.includes(c.word)));
+  const ladder = (cat) => [].concat(...levels.map((l) => unseen(l, cat).concat(seen(l, cat))));
   const pools = players.map((p) => ladder(p.deck));
   const any = ladder('');
   const used = new Set();
@@ -138,11 +146,13 @@ function buildDeck(mode, difficulty, words, players) {
   if (mode === 'relatives') {
     // words alternate between the players' decks, then the whole run is sorted easy to hard
     const cards = Array.from({ length: words }, (_, i) => draw(i % players.length));
+    remember(cards.map((c) => c.word));
     return cards.map((c, i) => ({ c, i })).sort((a, b) => a.c.level - b.c.level || a.i - b.i).map((x) => x.c);
   }
   // one item per player per round, from that player's own deck
   const cards = [];
   for (let r = 0; r < words; r++) for (let t = 0; t < players.length; t++) cards.push(draw(t));
+  remember(cards.map((c) => c.word));
   return cards.map((c) => (mode === 'pair' ? makePair(c) : makeWhy(c)));
 }
 function nextWord() {
@@ -190,8 +200,13 @@ function answer(choice) {
   if (S.online) { S.phase = 'verdict'; S.done = true; sendResult({ round: S.online.round, choice, right, pts }); render(); return; }
   p.score += pts; p.rounds.push(pts);
   if (right === true) p.right += 1; else if (right === false) p.wrong += 1;
+  S.log.push(logEntry(S.mode, S.word, p, it, choice, right, pts));
   S.phase = 'verdict';
   render();
+}
+// one line of the scoreboard page: what came up, what the player did, what it paid
+function logEntry(mode, round, p, it, choice, right, pts) {
+  return { round, id: p.id, name: p.name, word: it.card.word, other: mode === 'pair' ? it.other : (choice === null ? '' : `story ${'ABC'[choice]}`), truth: mode === 'pair' ? (it.related ? 'related' : 'not related') : `story ${'ABC'[it.options.findIndex((o) => o.right)]}`, right, pts };
 }
 function afterVerdict() {
   if (S.online) { if (net && net.role === 'host') hostNext(); return; }
@@ -228,6 +243,7 @@ function reveal() {
   const card = S.card;
   const { found, deltas } = tally(card, S.players, (p) => S.plays[p.id]);
   S.history.push({ card, found, deltas, plays: S.plays });
+  S.log.push({ round: S.word, word: card.word, found, deltas });
   S.phase = 'reveal';
   sfx.reveal();
   render();
@@ -250,6 +266,7 @@ function render() {
         <div class="case" id="case"></div>
         <div class="timer" id="timer"><i></i></div>
         <div class="secs" id="secs"></div>
+        <button class="btn ghost" id="boardbtn" title="Scores and every word so far">Scoreboard</button>
         <button class="btn ghost" id="rulesbtn" title="How to play">How to play</button>
         <button class="btn ghost" id="restartbtn" title="Back to the start">Restart game</button>
       </header>
@@ -266,6 +283,7 @@ function render() {
       </main>
       <div id="overlay"></div>`;
     document.getElementById('restartbtn').addEventListener('click', () => { overlay = null; leaveRoom(); newGame(); });
+    document.getElementById('boardbtn').addEventListener('click', () => { overlay = overlay === 'board' ? null : 'board'; renderOverlay(); });
     document.getElementById('rulesbtn').addEventListener('click', () => { overlay = overlay === 'rules' ? null : 'rules'; renderOverlay(); });
   }
   renderHeader(); renderTrack(); renderCard(); renderStage(); renderPlayers(); renderHowto(); renderOverlay();
@@ -372,7 +390,7 @@ function renderStage() {
     const v = S.verdict;
     const last = S.turn + 1 >= S.players.length && S.word + 1 >= prefs.words;
     let detail = '';
-    if (S.mode === 'why') detail = `<div class="stories">${S.item.options.map((o, i) => `<div class="story ${o.right ? 'true' : ''} ${v.choice === i ? 'picked' : ''}"><b>${'ABC'[i]}</b>${esc(o.text)}${o.right ? '<i>true</i>' : v.choice === i ? '<i>your pick</i>' : ''}</div>`).join('')}</div>`;
+    if (S.mode === 'why') detail = `<div class="story">${esc(S.card.story)}</div><div class="stories">${S.item.options.map((o, i) => `<div class="story ${o.right ? 'true' : ''} ${v.choice === i ? 'picked' : ''}"><b>${'ABC'[i]}</b>${esc(o.text)}${o.right ? '<i>true</i>' : v.choice === i ? '<i>your pick</i>' : ''}</div>`).join('')}</div>`;
     const allDone = S.online && S.online.phase === 'between';
     const btn = !S.online ? `<button class="btn blood big" id="nextbtn">${last ? 'Final scores' : S.turn + 1 < S.players.length ? `Pass to ${esc(S.players[S.turn + 1].name)}` : 'Next round'}</button>`
       : allDone && net && net.role === 'host' ? `<button class="btn blood big" id="nextbtn">${S.online.round + 1 >= S.online.total ? 'Final scores' : 'Next round'}</button>` : `<span class="muted">${waiting()}</span>`;
@@ -389,8 +407,11 @@ function renderStage() {
     const seen = new Set();
     S.players.forEach((pl) => h.plays[pl.id].forEach((g) => { const k = `${pl.id}:${norm(g.word)}`; if (g.kind === 'miss' && !seen.has(k)) { seen.add(k); misses.push({ p: pl, g }); } }));
     const shown = misses.slice(0, 14);
+    const notes = Object.entries(c.notes || {});
     el.innerHTML = `<h3>The file on ${esc(up(c.word))}</h3>
+      <div class="story">${esc(c.story)}</div>
       <div class="famlist">${h.found.map(chip).join('')}</div>
+      ${notes.length ? `<div class="cousins"><b>Why they belong.</b> ${notes.map(([w, n]) => `<span class="ff"><em>${esc(w)}</em>: ${esc(n)}</span>`).join(' · ')}</div>` : ''}
       ${c.friends.length ? `<div class="cousins"><b>False friends.</b> ${c.friends.map(([w, n]) => `<span class="ff"><em>${esc(w)}</em>: ${esc(n)}</span>`).join(' · ')}</div>` : ''}
       ${misses.length ? `<div class="cousins"><b>Thrown out.</b> ${shown.map(({ p: pl, g }) => `<span style="color:${colorOf(pl.id)}">${esc(g.word)}</span>${g.note ? ` (${esc(g.note)})` : ''}`).join(', ')}${misses.length > shown.length ? ` and ${misses.length - shown.length} more` : ''}. Not in the file. If one really is a relative, the file is wrong, not you.</div>` : ''}
       <div class="board">${h.deltas.slice().sort((a, b) => b.pts - a.pts).map((d) => `<div class="r"><span class="n"></span><span style="color:${colorOf(d.id)}">${esc(d.name)}<small>${d.hits} found${d.only ? ` · ${d.only} nobody else had` : ''}</small></span><span class="pts">+${d.pts}</span></div>`).join('')}</div>
@@ -450,7 +471,7 @@ function renderLobby(el) {
       </div>
     </div>
     <p class="muted">${FAMILIES.length} words on file. Nothing is filtered.</p>`;
-  const sync = () => { prefs.count = Number(document.getElementById('count').value); prefs.words = Number(document.getElementById('words').value); prefs.seconds[prefs.mode] = Number(document.getElementById('secs2').value); document.querySelectorAll('#names2 label').forEach((l, i) => { l.hidden = i + 1 >= prefs.count; }); savePrefs(); };
+  const sync = () => { prefs.count = Number(document.getElementById('count').value); prefs.words = Number(document.getElementById('words').value) || 8; prefs.seconds[prefs.mode] = Number(document.getElementById('secs2').value); document.querySelectorAll('#names2 label').forEach((l, i) => { l.hidden = i + 1 >= prefs.count; }); savePrefs(); };
   ['count', 'words', 'secs2'].forEach((id) => document.getElementById(id).addEventListener('change', sync));
   document.getElementById('diff').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; prefs.difficulty = b.dataset.d; savePrefs(); render(); });
   document.getElementById('dailybtn').addEventListener('click', () => { sync(); prefs.count = 1; S.room = `daily-${today()}`; prefs.words = 5; savePrefs(); audio(); startGame(); });
@@ -506,7 +527,7 @@ function hostRoom() {
   const code = makeCode();
   net = { role: 'host', code, peer: null };
   netMsg('Opening a room…');
-  R = { code, mode: prefs.mode, difficulty: prefs.difficulty, words: prefs.words, seconds: secsFor(), players: [newPlayer(0, prefs.names[0], prefs.decks[0])], conns: [null], phase: 'lobby', round: 0, deck: [], reveal: null };
+  R = { code, mode: prefs.mode, difficulty: prefs.difficulty, words: prefs.words, seconds: secsFor(), players: [newPlayer(0, prefs.names[0], prefs.decks[0])], conns: [null], phase: 'lobby', round: 0, deck: [], reveal: null, log: [] };
   const peer = new Peer(peerId(code), { config: ICE });
   net.peer = peer;
   peer.on('open', () => { lastNetMsg = ''; broadcast(); });
@@ -563,7 +584,7 @@ function hostStart() {
   random = Math.random;
   S.difficulty = R.difficulty;
   R.deck = buildDeck(R.mode, R.difficulty, R.words, R.players);
-  R.round = 0; R.phase = 'play'; R.reveal = null;
+  R.round = 0; R.phase = 'play'; R.reveal = null; R.log = [];
   R.players.forEach((p) => { p.done = false; p.result = null; });
   broadcast();
 }
@@ -577,6 +598,8 @@ function hostResult(i, msg) {
     const pts = msg.right === true ? RIGHT : msg.right === false ? -WRONG : 0;
     p.score += pts; p.rounds.push(pts);
     if (msg.right === true) p.right += 1; else if (msg.right === false) p.wrong += 1;
+    const it = R.deck[R.round * R.players.length + i];
+    R.log.push(logEntry(R.mode, R.round, p, it, msg.choice === undefined ? null : msg.choice, msg.right === true ? true : msg.right === false ? false : null, pts));
   }
   hostCheckDone();
   broadcast();
@@ -588,6 +611,7 @@ function hostCheckDone() {
     const { found, deltas } = tally(card, R.players, (p) => p.result || []);
     const plays = R.players.map((p) => p.result || []);
     R.reveal = { card, found, deltas, plays };
+    R.log.push({ round: R.round, word: card.word, found, deltas });
     R.phase = 'reveal';
   } else R.phase = 'between';
 }
@@ -605,7 +629,7 @@ function viewFor(i) {
     type: 'view', code: R.code, phase: R.phase, mode: R.mode, difficulty: R.difficulty, seconds: R.seconds, total: R.words, round: R.round, me: i,
     players: R.players.map((p) => ({ id: p.id, name: p.name, deck: p.deck, score: p.score, best: p.best, right: p.right, wrong: p.wrong, rounds: p.rounds, done: p.done, online: p.online })),
     card: R.phase === 'lobby' ? null : R.mode === 'relatives' ? R.deck[Math.min(R.round, R.words - 1)] : item.card,
-    item, reveal: R.reveal,
+    item, reveal: R.reveal, log: R.log,
   };
 }
 function broadcast() {
@@ -622,7 +646,7 @@ function guestMessage(msg) {
 function applyView(v) {
   const fresh = !S.online || S.online.round !== v.round || S.online.phase === 'lobby';
   S.online = v; S.mode = v.mode; S.difficulty = v.difficulty; S.room = '';
-  S.players = v.players; S.turn = v.me; S.word = v.round; S.card = v.card; S.item = v.item;
+  S.players = v.players; S.turn = v.me; S.word = v.round; S.card = v.card; S.item = v.item; S.log = v.log || [];
   const me = v.players[v.me];
   if (v.phase === 'lobby') { S.phase = 'olobby'; deadline = null; render(); return; }
   if (v.phase === 'play') {
@@ -696,6 +720,30 @@ function renderOverlay() {
       <div class="row"><button class="btn big pc" id="readybtn">I'm ${esc(p.name)}, go</button></div>
     </div></div>`;
     document.getElementById('readybtn').addEventListener('click', () => { audio(); beginTurn(); });
+    return;
+  }
+  if (overlay === 'board') {
+    const g = S.log && S.log.length ? { mode: S.mode, players: S.players, log: S.log, code: S.online ? S.online.code : '', live: S.phase !== 'final' } : lastGame ? Object.assign({ live: false, previous: true }, lastGame) : null;
+    let body = '<p class="muted">Nothing played yet. The scoreboard fills in as the words go by.</p>';
+    if (g) {
+      const sorted = g.players.slice().sort((a, b) => b.score - a.score);
+      const board = `<div class="board">${sorted.map((q, i) => `<div class="r"><span class="n">${i + 1}</span><span style="color:${colorOf(q.id)}">${esc(q.name)}</span><span class="pts">${q.score}</span></div>`).join('')}</div>`;
+      let rows;
+      if (g.mode === 'relatives') {
+        rows = g.log.map((e) => `<div class="logrow"><div class="logword">${e.round + 1}. ${esc(up(e.word))}</div><div class="famlist">${e.found.map((x) => `<span class="fam ${x.by.length ? 'got' : 'none'}">${esc(x.f)}${x.by.map((id) => `<b style="background:${colorOf(id)}">${esc(initials((g.players[id] || {}).name || '?'))}</b>`).join('')}</span>`).join('')}</div><div class="muted">${e.deltas.map((d) => `<span style="color:${colorOf(d.id)}">${esc(d.name)} +${d.pts}</span>`).join(' · ')}</div></div>`).join('');
+      } else {
+        const byRound = {};
+        g.log.forEach((e) => { (byRound[e.round] = byRound[e.round] || []).push(e); });
+        rows = Object.keys(byRound).sort((a, b) => a - b).map((r) => `<div class="logrow"><div class="logword">Round ${Number(r) + 1}</div>${byRound[r].map((e) => `<div class="logline"><span style="color:${colorOf(e.id)}">${esc(e.name)}</span> · ${esc(up(e.word))}${e.other ? ` and ${esc(up(e.other))}` : ''} · <b>${e.right === null ? 'out of time' : e.right ? 'right' : 'wrong'}</b> (${esc(e.truth)}) · ${e.pts > 0 ? `+${e.pts}` : e.pts}</div>`).join('')}</div>`).join('');
+      }
+      body = `${g.previous ? '<p class="muted">The last game. A new one starts the board fresh.</p>' : ''}${board}<h3>${g.mode === 'relatives' ? 'Words found' : 'Every round'}</h3>${rows || '<p class="muted">No rounds finished yet.</p>'}`;
+    }
+    el.innerHTML = `<div class="overlay" id="ov"><div class="sheet wide">
+      <h2>Scoreboard${g && g.code ? ` · ${esc(g.code)}` : ''}</h2>
+      <div class="boardpage">${body}</div>
+      <div class="row"><button class="btn blood" id="ovclose">Close</button></div>
+    </div></div>`;
+    document.getElementById('ovclose').addEventListener('click', () => { overlay = null; renderOverlay(); });
     return;
   }
   if (overlay === 'rules') {
