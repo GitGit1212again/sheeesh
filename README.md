@@ -2,7 +2,7 @@
 
 Words have relatives. Salary, salad and sausage all come from the Latin word for salt; solar doesn't. The game is telling which is which, faster than the others.
 
-One to four people at one PC or phone. One HTML file; double-click it and pass the keyboard. Nothing leaves the machine. The playable file is `dist/sHeeSh.html`; a copy sits on the Desktop; the installable version is at https://gitgit1212again.github.io/sheeesh/ .
+One to four people. Either at one screen, passing it round, or each on their own phone: one person hosts and gets a four-letter code, the others type it in, players are numbered as they arrive, and everyone plays each round at the same time on their own screen. Online play connects the phones directly to each other (WebRTC through PeerJS); nothing is stored anywhere. The playable file is `dist/sHeeSh.html`; a copy sits on the Desktop; the installable version is at https://gitgit1212again.github.io/sheeesh/ .
 
 ## Three ways to play
 

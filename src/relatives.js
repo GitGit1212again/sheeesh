@@ -7,6 +7,7 @@ const FAMILIES = require('./families');
 const DECOYS = require('./decoys');
 const { plateArt, paletteFor } = require('./art');
 const { judgeWord, norm } = require('./match');
+const { Peer } = require('peerjs');
 
 const app = document.getElementById('app');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -44,7 +45,7 @@ const MODES = {
 };
 
 // ---------- prefs ----------
-let prefs = { names: ['', '', '', ''], decks: ['', '', '', ''], count: 2, words: 8, seconds: { relatives: 45, pair: 15, why: 20 }, mode: 'relatives', difficulty: 'hard', room: '' };
+let prefs = { names: ['', '', '', ''], decks: ['', '', '', ''], count: 2, words: 8, seconds: { relatives: 45, pair: 15, why: 20 }, mode: 'relatives', difficulty: 'hard' };
 try { const p = JSON.parse(localStorage.getItem('sheeesh.v3.prefs') || '{}'); if (typeof p.seconds !== 'object') delete p.seconds; if (!Array.isArray(p.decks)) delete p.decks; Object.assign(prefs, p); } catch (_) { /* fresh */ }
 const savePrefs = () => { try { localStorage.setItem('sheeesh.v3.prefs', JSON.stringify(prefs)); } catch (_) { /* ignore */ } };
 const secsFor = () => prefs.seconds[prefs.mode] || MODES[prefs.mode].seconds[1];
@@ -89,7 +90,7 @@ function makePair(card) {
     const other = pick(card.family);
     return { card, other, related: true, why: `${up(other)} is family. ${card.origin}` };
   }
-  if (card.friends.length && random() < (prefs.difficulty === 'expert' ? 0.9 : 0.6)) {
+  if (card.friends.length && random() < ((S.difficulty || prefs.difficulty) === 'expert' ? 0.9 : 0.6)) {
     const [other, note] = pick(card.friends);
     return { card, other, related: false, why: `${up(other)} looks the part and isn't: ${note}. ${up(card.word)} is ${card.origin}` };
   }
@@ -117,30 +118,32 @@ function newGame() {
 function startGame() {
   S.mode = prefs.mode;
   S.difficulty = prefs.difficulty;
-  S.room = (prefs.room || '').trim().toLowerCase();
   random = S.room ? seeded(`${S.room}|${S.mode}|${S.difficulty}|${prefs.words}`) : Math.random;
-  S.players = Array.from({ length: prefs.count }, (_, i) => ({ id: i, name: (prefs.names[i] || '').trim() || `Player ${i + 1}`, deck: prefs.decks[i] || '', score: 0, best: null, right: 0, wrong: 0, rounds: [] }));
-  // Each player has a favourite deck (or any). The ladder: shuffle within each level, then climb.
-  // Easy leaves out the expert words; expert skips the easy ones.
-  const levels = S.difficulty === 'easy' ? [1, 2] : S.difficulty === 'expert' ? [2, 3] : [1, 2, 3];
+  S.players = Array.from({ length: prefs.count }, (_, i) => newPlayer(i, prefs.names[i], prefs.decks[i]));
+  S.deck = buildDeck(S.mode, S.difficulty, prefs.words, S.players);
+  S.word = 0;
+  nextWord();
+}
+const newPlayer = (i, name, deck) => ({ id: i, name: (name || '').trim() || `Player ${i + 1}`, deck: deck || '', score: 0, best: null, right: 0, wrong: 0, rounds: [], done: false, online: true });
+// Each player has a favourite deck (or any). The ladder: shuffle within each level, then climb.
+// Easy leaves out the expert words; expert skips the easy ones.
+function buildDeck(mode, difficulty, words, players) {
+  const levels = difficulty === 'easy' ? [1, 2] : difficulty === 'expert' ? [2, 3] : [1, 2, 3];
   const ladder = (cat) => [].concat(...levels.map((l) => shuffle(FAMILIES.filter((c) => c.level === l && (!cat || c.cat === cat)))));
-  const pools = S.players.map((p) => ladder(p.deck));
+  const pools = players.map((p) => ladder(p.deck));
   const any = ladder('');
   const used = new Set();
   // the next unused word from a player's deck, falling back to the whole file
   const draw = (i) => { const c = pools[i].find((x) => !used.has(x)) || any.find((x) => !used.has(x)) || any[0]; used.add(c); return c; };
-  if (S.mode === 'relatives') {
+  if (mode === 'relatives') {
     // words alternate between the players' decks, then the whole run is sorted easy to hard
-    const cards = Array.from({ length: prefs.words }, (_, i) => draw(i % S.players.length));
-    S.deck = cards.map((c, i) => ({ c, i })).sort((a, b) => a.c.level - b.c.level || a.i - b.i).map((x) => x.c);
-  } else {
-    // one item per player per round, from that player's own deck
-    const cards = [];
-    for (let r = 0; r < prefs.words; r++) for (let t = 0; t < S.players.length; t++) cards.push(draw(t));
-    S.deck = cards.map((c) => (S.mode === 'pair' ? makePair(c) : makeWhy(c)));
+    const cards = Array.from({ length: words }, (_, i) => draw(i % players.length));
+    return cards.map((c, i) => ({ c, i })).sort((a, b) => a.c.level - b.c.level || a.i - b.i).map((x) => x.c);
   }
-  S.word = 0;
-  nextWord();
+  // one item per player per round, from that player's own deck
+  const cards = [];
+  for (let r = 0; r < words; r++) for (let t = 0; t < players.length; t++) cards.push(draw(t));
+  return cards.map((c) => (mode === 'pair' ? makePair(c) : makeWhy(c)));
 }
 function nextWord() {
   S.turn = 0;
@@ -182,14 +185,16 @@ function answer(choice) {
   let right = null;
   if (choice !== null) right = S.mode === 'pair' ? choice === it.related : !!it.options[choice].right;
   const pts = right === null ? 0 : right ? RIGHT : -WRONG;
-  p.score += pts; p.rounds.push(pts);
-  if (right === true) p.right += 1; else if (right === false) p.wrong += 1;
   S.verdict = { choice, right, pts };
   if (right === true) sfx.hit(); else if (right === false) sfx.miss();
+  if (S.online) { S.phase = 'verdict'; S.done = true; sendResult({ round: S.online.round, choice, right, pts }); render(); return; }
+  p.score += pts; p.rounds.push(pts);
+  if (right === true) p.right += 1; else if (right === false) p.wrong += 1;
   S.phase = 'verdict';
   render();
 }
 function afterVerdict() {
+  if (S.online) { if (net && net.role === 'host') hostNext(); return; }
   S.turn += 1;
   if (S.turn < S.players.length) { loadItem(); beginTurn(); return; }
   S.word += 1;
@@ -200,14 +205,15 @@ function endTurn(timedOut) {
   if (S.phase !== 'turn') return;
   if (S.mode !== 'relatives') { answer(null); return; }
   deadline = null;
+  if (S.online) { S.phase = 'wait'; S.done = true; sendResult({ round: S.online.round, plays: S.plays[S.turn] }); render(); return; }
   S.turn += 1;
   if (S.turn < S.players.length) { S.phase = 'pass'; render(); return; }
   reveal();
 }
-function reveal() {
-  const card = S.card;
-  const found = card.family.map((f) => ({ f, by: S.players.filter((p) => S.plays[p.id].some((g) => g.kind === 'hit' && g.hit === f)).map((p) => p.id) }));
-  const deltas = S.players.map((p) => {
+// Who found what, and what it pays. Mutates the players' scores.
+function tally(card, players, playsOf) {
+  const found = card.family.map((f) => ({ f, by: players.filter((p) => (playsOf(p) || []).some((g) => g.kind === 'hit' && g.hit === f)).map((p) => p.id) }));
+  const deltas = players.map((p) => {
     const hits = found.filter((x) => x.by.includes(p.id));
     const only = hits.filter((x) => x.by.length === 1);
     const pts = hits.length * HIT + only.length * ONLY;
@@ -216,17 +222,23 @@ function reveal() {
     if (longest && (!p.best || longest.length > p.best.word.length)) p.best = { word: longest, of: card.word };
     return { id: p.id, name: p.name, hits: hits.length, only: only.length, pts };
   });
+  return { found, deltas };
+}
+function reveal() {
+  const card = S.card;
+  const { found, deltas } = tally(card, S.players, (p) => S.plays[p.id]);
   S.history.push({ card, found, deltas, plays: S.plays });
   S.phase = 'reveal';
   sfx.reveal();
   render();
 }
 function afterReveal() {
+  if (S.online) { if (net && net.role === 'host') hostNext(); return; }
   S.word += 1;
   if (S.word >= S.deck.length) { S.phase = 'final'; render(); return; }
   nextWord();
 }
-const totalRounds = () => (S.mode === 'relatives' ? S.deck.length : prefs.words);
+const totalRounds = () => (S.online ? S.online.total : S.mode === 'relatives' ? S.deck.length : prefs.words);
 
 // ---------- render ----------
 function render() {
@@ -253,19 +265,19 @@ function render() {
         </aside>
       </main>
       <div id="overlay"></div>`;
-    document.getElementById('restartbtn').addEventListener('click', () => { overlay = null; newGame(); });
+    document.getElementById('restartbtn').addEventListener('click', () => { overlay = null; leaveRoom(); newGame(); });
     document.getElementById('rulesbtn').addEventListener('click', () => { overlay = overlay === 'rules' ? null : 'rules'; renderOverlay(); });
   }
   renderHeader(); renderTrack(); renderCard(); renderStage(); renderPlayers(); renderHowto(); renderOverlay();
 }
 function renderHeader() {
   const c = document.getElementById('case');
-  c.textContent = S.phase === 'lobby' ? '' : S.phase === 'final' ? 'Game over' : `${MODES[S.mode].name} · ${S.mode === 'relatives' ? 'word' : 'round'} ${S.word + 1} of ${totalRounds()} · level ${S.card ? S.card.level : ''}${S.room ? ` · room ${S.room}` : ''}`;
+  c.textContent = S.phase === 'lobby' ? '' : S.phase === 'final' ? 'Game over' : S.phase === 'olobby' ? `Online · code ${S.online.code}` : `${S.online ? `Online ${S.online.code} · ` : ''}${MODES[S.mode].name} · ${S.mode === 'relatives' ? 'word' : 'round'} ${S.word + 1} of ${totalRounds()} · level ${S.card ? S.card.level : ''}${S.room && !S.online ? ` · ${S.room}` : ''}`;
 }
 function renderTrack() {
   const el = document.getElementById('track');
-  if (S.phase === 'lobby' || S.phase === 'final') { el.innerHTML = ''; return; }
-  const done = (i) => i < S.turn || S.phase === 'reveal';
+  if (S.phase === 'lobby' || S.phase === 'olobby' || S.phase === 'final') { el.innerHTML = ''; return; }
+  const done = (i) => (S.online ? S.players[i].done || S.phase === 'reveal' : i < S.turn || S.phase === 'reveal');
   el.innerHTML = `<div class="turns">${S.players.map((p, i) => `<span class="turn ${done(i) ? 'done' : i === S.turn ? 'now' : ''}" style="--pc:${colorOf(p.id)}"><i>${i + 1}</i>${esc(p.name)}</span>`).join('')}${S.mode === 'relatives' ? `<span class="turn ${S.phase === 'reveal' ? 'now' : ''}" style="--pc:#fff"><i>★</i>the file</span>` : ''}</div>`;
 }
 function tick() {
@@ -280,7 +292,7 @@ function tick() {
 }
 setInterval(tick, 200);
 
-const cardNo = (c) => String(1000 + FAMILIES.indexOf(c)).padStart(4, '0');
+const cardNo = (c) => String(1000 + FAMILIES.findIndex((x) => x.word === c.word)).padStart(4, '0');
 const barcode = () => `<span class="bar">${Array.from({ length: 22 }, () => `<i style="height:${6 + rnd(8)}px"></i>`).join('')}</span>`;
 function plate({ cat, band, body, stamp, foot }) {
   const p = paletteFor(cat);
@@ -295,7 +307,7 @@ function plate({ cat, band, body, stamp, foot }) {
 function renderCard() {
   const el = document.getElementById('card');
   const c = S.card;
-  if (S.phase === 'lobby' || S.phase === 'final' || !c) {
+  if (S.phase === 'lobby' || S.phase === 'olobby' || S.phase === 'final' || !c) {
     el.innerHTML = plate({ cat: 'misc', band: 'the file', body: `<div class="plate-word">sHeeSh</div><div class="plate-rule"></div><div class="plate-origin">Words have relatives. Salary, salad and sausage all come from the Latin word for salt; solar doesn't. The game is telling which is which. ${esc(MODES[prefs.mode].blurb)}</div>`, foot: S.phase === 'final' ? 'game over' : 'pick a way to play' });
     return;
   }
@@ -326,7 +338,14 @@ function renderCard() {
 function renderStage() {
   const el = document.getElementById('stage');
   if (S.phase === 'lobby') { renderLobby(el); return; }
+  if (S.phase === 'olobby') { renderOnlineLobby(el); return; }
   const p = S.players[S.turn];
+  const waiting = () => { const w = S.players.filter((q) => !q.done && q.online).map((q) => esc(q.name)); return w.length ? `Waiting for ${w.join(', ')}.` : (net && net.role === 'host' ? '' : `Waiting for ${esc(S.players[0].name)} to press Next.`); };
+  if (S.phase === 'wait') {
+    el.innerHTML = `<h3 style="color:${colorOf(p.id)}">Done, ${esc(p.name)}.</h3><div class="slots" id="slots"></div><div class="guesses" id="guesses"></div><p class="muted">${waiting()}</p>`;
+    renderGuesses();
+    return;
+  }
   if (S.phase === 'turn' && S.mode === 'relatives') {
     el.innerHTML = `<h3 style="color:${colorOf(p.id)}">${esc(p.name)}, type the relatives of ${esc(up(S.card.word))}</h3>
       <form class="playform" id="gform"><input class="word" id="guess" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="a word, then Enter"><button class="btn blood" type="submit">Add</button><button class="btn ghost" type="button" id="donebtn">Done</button></form>
@@ -354,9 +373,12 @@ function renderStage() {
     const last = S.turn + 1 >= S.players.length && S.word + 1 >= prefs.words;
     let detail = '';
     if (S.mode === 'why') detail = `<div class="stories">${S.item.options.map((o, i) => `<div class="story ${o.right ? 'true' : ''} ${v.choice === i ? 'picked' : ''}"><b>${'ABC'[i]}</b>${esc(o.text)}${o.right ? '<i>true</i>' : v.choice === i ? '<i>your pick</i>' : ''}</div>`).join('')}</div>`;
+    const allDone = S.online && S.online.phase === 'between';
+    const btn = !S.online ? `<button class="btn blood big" id="nextbtn">${last ? 'Final scores' : S.turn + 1 < S.players.length ? `Pass to ${esc(S.players[S.turn + 1].name)}` : 'Next round'}</button>`
+      : allDone && net && net.role === 'host' ? `<button class="btn blood big" id="nextbtn">${S.online.round + 1 >= S.online.total ? 'Final scores' : 'Next round'}</button>` : `<span class="muted">${waiting()}</span>`;
     el.innerHTML = `<h3 style="color:${colorOf(p.id)}">${v.right === null ? 'Out of time.' : v.right ? `Right, ${esc(p.name)}.` : `No, ${esc(p.name)}.`} ${v.pts > 0 ? `+${v.pts}` : v.pts < 0 ? `−${-v.pts}` : '0'}</h3>${detail}
-      <div class="row"><button class="btn blood big" id="nextbtn">${last ? 'Final scores' : S.turn + 1 < S.players.length ? `Pass to ${esc(S.players[S.turn + 1].name)}` : 'Next round'}</button></div>`;
-    document.getElementById('nextbtn').addEventListener('click', afterVerdict);
+      <div class="row">${btn}</div>`;
+    const nb = document.getElementById('nextbtn'); if (nb) nb.addEventListener('click', afterVerdict);
     return;
   }
   if (S.phase === 'reveal') {
@@ -372,8 +394,8 @@ function renderStage() {
       ${c.friends.length ? `<div class="cousins"><b>False friends.</b> ${c.friends.map(([w, n]) => `<span class="ff"><em>${esc(w)}</em>: ${esc(n)}</span>`).join(' · ')}</div>` : ''}
       ${misses.length ? `<div class="cousins"><b>Thrown out.</b> ${shown.map(({ p: pl, g }) => `<span style="color:${colorOf(pl.id)}">${esc(g.word)}</span>${g.note ? ` (${esc(g.note)})` : ''}`).join(', ')}${misses.length > shown.length ? ` and ${misses.length - shown.length} more` : ''}. Not in the file. If one really is a relative, the file is wrong, not you.</div>` : ''}
       <div class="board">${h.deltas.slice().sort((a, b) => b.pts - a.pts).map((d) => `<div class="r"><span class="n"></span><span style="color:${colorOf(d.id)}">${esc(d.name)}<small>${d.hits} found${d.only ? ` · ${d.only} nobody else had` : ''}</small></span><span class="pts">+${d.pts}</span></div>`).join('')}</div>
-      <div class="row"><button class="btn blood big" id="nextbtn">${S.word + 1 >= S.deck.length ? 'Final scores' : 'Next word'}</button></div>`;
-    document.getElementById('nextbtn').addEventListener('click', afterReveal);
+      <div class="row">${!S.online || (net && net.role === 'host') ? `<button class="btn blood big" id="nextbtn">${S.word + 1 >= totalRounds() ? 'Final scores' : 'Next word'}</button>` : `<span class="muted">${waiting()}</span>`}</div>`;
+    const nb = document.getElementById('nextbtn'); if (nb) nb.addEventListener('click', afterReveal);
     return;
   }
   if (S.phase === 'final') {
@@ -385,7 +407,7 @@ function renderStage() {
       <div class="board">${sorted.map((q, i) => `<div class="r${q.score === top ? ' win' : ''}"><span class="n">${i + 1}</span><span style="color:${colorOf(q.id)}">${esc(q.name)}<small>${line(q)}</small></span><span class="pts">${q.score}</span></div>`).join('')}</div>
       <div class="row"><button class="btn blood big" id="againbtn">Play again</button><button class="btn ghost" id="sharebtn">Copy result</button></div>
       <textarea class="share" id="sharetxt" readonly>${esc(shareText())}</textarea>`;
-    document.getElementById('againbtn').addEventListener('click', newGame);
+    document.getElementById('againbtn').addEventListener('click', () => { leaveRoom(); newGame(); });
     document.getElementById('sharebtn').addEventListener('click', () => { const t = document.getElementById('sharetxt'); t.select(); const done = () => toast('Copied. Paste it in the channel.'); if (navigator.clipboard) navigator.clipboard.writeText(t.value).then(done, () => { document.execCommand('copy'); done(); }); else { document.execCommand('copy'); done(); } });
     return;
   }
@@ -394,36 +416,229 @@ function renderStage() {
 // One line per player for pasting into Discord: room, mode, level, score, and a square per round.
 function shareText() {
   const sq = (n) => (n > 0 ? '🟩' : n < 0 ? '🟥' : '⬛');
-  const where = S.room ? (S.room.startsWith('daily-') ? `daily ${S.room.slice(6)}` : `room ${S.room}`) : 'random deal';
+  const where = S.online ? `online ${S.online.code}` : S.room ? (S.room.startsWith('daily-') ? `daily ${S.room.slice(6)}` : `room ${S.room}`) : 'at one screen';
   const head = `sHeeSh · ${where} · ${MODES[S.mode].name} · ${DIFF[S.difficulty].name}`;
   return [head].concat(S.players.map((p) => `${p.name}: ${p.score} ${p.rounds.map(sq).join('')}`)).concat([S.room ? 'https://gitgit1212again.github.io/sheeesh/' : '']).filter(Boolean).join('\n');
 }
 function renderLobby(el) {
   const m = MODES[prefs.mode];
-  el.innerHTML = `<h3>How do you want it</h3>
+  const deckSel = (i) => `<select class="fav" data-d="${i}" title="Favourite deck"><option value="">Any deck</option>${DECKS.map((d) => `<option value="${d}"${prefs.decks[i] === d ? ' selected' : ''}>${esc(paletteFor(d).name)}</option>`).join('')}</select>`;
+  el.innerHTML = `<h3>You</h3>
+    <div class="settings" id="names"><label class="pname"><span class="swatch" style="background:${colorOf(0)}"></span><input data-i="0" maxlength="18" placeholder="Your name" value="${esc(prefs.names[0] || '')}">${deckSel(0)}</label></div>
+    <h3>How do you want it</h3>
     <div class="decks modes" id="modes">${Object.entries(MODES).map(([k, v]) => `<button type="button" class="deck${k === prefs.mode ? ' on' : ''}" data-mode="${k}"><span class="dart glyph">${v.glyph}</span><span class="dname">${esc(v.name)}</span></button>`).join('')}</div>
     <p class="muted" id="modeblurb">${esc(m.blurb)}</p>
     <div class="seg diff" id="diff">${Object.entries(DIFF).map(([k, v]) => `<button type="button" class="${k === prefs.difficulty ? 'on' : ''}" data-d="${k}">${v.name}</button>`).join('')}</div>
     <p class="muted">${esc(DIFF[prefs.difficulty].blurb)}</p>
     <div class="settings">
-      <label>Players <select id="count">${[1, 2, 3, 4].map((n) => `<option value="${n}"${prefs.count === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
       <label>${prefs.mode === 'relatives' ? 'Words' : 'Rounds'} <select id="words">${[4, 6, 8, 10, 12].map((n) => `<option value="${n}"${prefs.words === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
       <label>Seconds <select id="secs2">${m.seconds.map((n) => `<option value="${n}"${secsFor() === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
     </div>
-    <div class="settings" id="names">${[0, 1, 2, 3].map((i) => `<label class="pname"${i >= prefs.count ? ' hidden' : ''}><span class="swatch" style="background:${colorOf(i)}"></span><input data-i="${i}" maxlength="18" placeholder="Player ${i + 1}" value="${esc(prefs.names[i] || '')}"><select class="fav" data-d="${i}" title="Favourite deck"><option value="">Any deck</option>${DECKS.map((d) => `<option value="${d}"${prefs.decks[i] === d ? ' selected' : ''}>${esc(paletteFor(d).name)}</option>`).join('')}</select></label>`).join('')}</div>
-    <div class="settings room"><label>Room code <input id="room" maxlength="24" placeholder="none: random deal" value="${esc(prefs.room || '')}"></label><span class="muted">Friends who enter the same code get the same game on their own devices. Compare scores after.</span></div>
-    <div class="row"><button class="btn blood big" id="startbtn">Deal</button><button class="btn ghost big" id="dailybtn">Today's daily</button></div>
-    <p class="muted">${FAMILIES.length} words on file. Nothing is filtered, nothing leaves this machine.</p>`;
-  const sync = () => { prefs.count = Number(document.getElementById('count').value); prefs.words = Number(document.getElementById('words').value); prefs.seconds[prefs.mode] = Number(document.getElementById('secs2').value); document.querySelectorAll('#names label').forEach((l, i) => { l.hidden = i >= prefs.count; }); savePrefs(); };
+    <div class="ways">
+      <div class="way">
+        <h3>With friends, each on their own phone</h3>
+        <p class="muted">One of you hosts and gets a four-letter code. The others type it in. Everyone is numbered as they arrive, and plays each round on their own screen at the same time.</p>
+        <div class="row"><button class="btn blood big" id="hostbtn">Host a game</button></div>
+        <form class="row joinrow" id="joinform"><input id="joincode" maxlength="4" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false"><button class="btn big" type="submit">Join</button></form>
+        <p class="muted" id="netmsg"></p>
+      </div>
+      <div class="way">
+        <h3>At one screen, passing it round</h3>
+        <div class="settings"><label>Players <select id="count">${[1, 2, 3, 4].map((n) => `<option value="${n}"${prefs.count === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label></div>
+        <div class="settings" id="names2">${[1, 2, 3].map((i) => `<label class="pname"${i >= prefs.count ? ' hidden' : ''}><span class="swatch" style="background:${colorOf(i)}"></span><input data-i="${i}" maxlength="18" placeholder="Player ${i + 1}" value="${esc(prefs.names[i] || '')}">${deckSel(i)}</label>`).join('')}</div>
+        <div class="row"><button class="btn blood big" id="startbtn">Deal</button><button class="btn ghost big" id="dailybtn">Today's daily, solo</button></div>
+      </div>
+    </div>
+    <p class="muted">${FAMILIES.length} words on file. Nothing is filtered.</p>`;
+  const sync = () => { prefs.count = Number(document.getElementById('count').value); prefs.words = Number(document.getElementById('words').value); prefs.seconds[prefs.mode] = Number(document.getElementById('secs2').value); document.querySelectorAll('#names2 label').forEach((l, i) => { l.hidden = i + 1 >= prefs.count; }); savePrefs(); };
   ['count', 'words', 'secs2'].forEach((id) => document.getElementById(id).addEventListener('change', sync));
   document.getElementById('diff').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; prefs.difficulty = b.dataset.d; savePrefs(); render(); });
-  document.getElementById('room').addEventListener('input', (e) => { prefs.room = e.target.value; savePrefs(); });
-  document.getElementById('dailybtn').addEventListener('click', () => { sync(); prefs.room = `daily-${today()}`; prefs.words = 5; savePrefs(); audio(); startGame(); });
+  document.getElementById('dailybtn').addEventListener('click', () => { sync(); prefs.count = 1; S.room = `daily-${today()}`; prefs.words = 5; savePrefs(); audio(); startGame(); });
   document.getElementById('modes').addEventListener('click', (e) => { const b = e.target.closest('button.deck'); if (!b) return; prefs.mode = b.dataset.mode; savePrefs(); render(); });
-  document.getElementById('names').addEventListener('input', (e) => { if (e.target.dataset.i != null) { prefs.names[Number(e.target.dataset.i)] = e.target.value; savePrefs(); } });
-  document.getElementById('names').addEventListener('change', (e) => { if (e.target.dataset.d != null) { prefs.decks[Number(e.target.dataset.d)] = e.target.value; savePrefs(); } });
-  document.getElementById('startbtn').addEventListener('click', () => { sync(); audio(); startGame(); });
+  el.addEventListener('input', (e) => { if (e.target.dataset.i != null) { prefs.names[Number(e.target.dataset.i)] = e.target.value; savePrefs(); } });
+  el.addEventListener('change', (e) => { if (e.target.dataset.d != null) { prefs.decks[Number(e.target.dataset.d)] = e.target.value; savePrefs(); } });
+  document.getElementById('startbtn').addEventListener('click', () => { sync(); S.room = ''; audio(); startGame(); });
+  document.getElementById('hostbtn').addEventListener('click', () => { sync(); audio(); hostRoom(); });
+  document.getElementById('joinform').addEventListener('submit', (e) => { e.preventDefault(); sync(); audio(); joinRoom(document.getElementById('joincode').value); });
+  document.getElementById('netmsg').textContent = lastNetMsg; lastNetMsg = '';
 }
+function renderOnlineLobby(el) {
+  const v = S.online;
+  const host = net && net.role === 'host';
+  const slots = [0, 1, 2, 3].map((i) => { const q = S.players[i]; return `<div class="player${q ? '' : ' empty'}"><div class="av" style="color:${colorOf(i)};border-color:${colorOf(i)}">${q ? esc(initials(q.name)) : i + 1}</div><div class="nm">${q ? `${esc(q.name)}<small>${esc(q.deck ? paletteFor(q.deck).name : 'any deck')}</small>` : '<span class="muted">waiting…</span>'}</div>${q && !q.online ? '<span class="you off">gone</span>' : ''}</div>`; }).join('');
+  el.innerHTML = `<h3>${host ? 'Your game code' : 'Joined'}</h3>
+    <div class="bigcode">${esc(v.code)}</div>
+    <p class="muted">${host ? 'Tell them: open the game, type this code, press Join. Players are numbered as they arrive.' : `Waiting for ${esc(S.players[0] ? S.players[0].name : 'the host')} to start.`}</p>
+    <div class="players slots4">${slots}</div>
+    <p class="muted">${esc(MODES[v.mode].name)} · ${esc(DIFF[v.difficulty].name)} · ${v.total} ${v.mode === 'relatives' ? 'words' : 'rounds'} · ${v.seconds} seconds each</p>
+    <div class="row">${host ? `<button class="btn blood big" id="gobtn"${S.players.length < 2 ? ' disabled' : ''}>${S.players.length < 2 ? 'Start when someone joins' : 'Start'}</button>` : ''}<button class="btn ghost" id="leavebtn">Leave</button></div>`;
+  const gb = document.getElementById('gobtn'); if (gb) gb.addEventListener('click', hostStart);
+  document.getElementById('leavebtn').addEventListener('click', () => { leaveRoom(); newGame(); });
+}
+
+// ---------- online: one host, up to three guests, each on their own device ----------
+// The host's page runs the room: it assigns player numbers in join order, deals, collects each
+// player's result for the round, tallies, and sends every player their own view. Guests only
+// render views and send results. Traffic goes straight between the phones (WebRTC via PeerJS);
+// the public PeerJS server only introduces them, and the relay below carries it when phones
+// can't reach each other directly.
+const ICE = { iceServers: [
+  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+] };
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const makeCode = () => Array.from({ length: 4 }, () => CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]).join('');
+const peerId = (code) => `sheesh-${code}`;
+let net = null; // { role: 'host'|'guest', code, peer, conn (guest), msg }
+let R = null; // the room, on the host only
+
+let lastNetMsg = '';
+function netMsg(text, bad) { lastNetMsg = text; const el = document.getElementById('netmsg'); if (el) el.textContent = text; if (bad) toast(text, true); }
+function leaveRoom() {
+  if (net && net.peer) { try { net.peer.destroy(); } catch (_) { /* gone */ } }
+  net = null; R = null;
+  if (S) { S.online = null; S.done = false; }
+}
+function hostRoom() {
+  leaveRoom();
+  const code = makeCode();
+  net = { role: 'host', code, peer: null };
+  netMsg('Opening a room…');
+  R = { code, mode: prefs.mode, difficulty: prefs.difficulty, words: prefs.words, seconds: secsFor(), players: [newPlayer(0, prefs.names[0], prefs.decks[0])], conns: [null], phase: 'lobby', round: 0, deck: [], reveal: null };
+  const peer = new Peer(peerId(code), { config: ICE });
+  net.peer = peer;
+  peer.on('open', () => { lastNetMsg = ''; broadcast(); });
+  peer.on('error', (e) => {
+    if (e.type === 'unavailable-id') { hostRoom(); return; }
+    netMsg(e.type === 'network' || e.type === 'server-error' ? 'Can\'t reach the matchmaking server. Check the connection and try again.' : `Connection problem: ${e.type}`, true);
+  });
+  peer.on('connection', (conn) => {
+    conn.on('data', (msg) => hostMessage(conn, msg));
+    conn.on('close', () => { const i = R.conns.indexOf(conn); if (i > 0) { R.players[i].online = false; if (R.phase === 'play') { R.players[i].done = true; hostCheckDone(); } broadcast(); } });
+  });
+}
+function joinRoom(raw) {
+  const code = String(raw || '').toUpperCase().replace(/[^A-Z]/g, '');
+  if (code.length !== 4) { netMsg('The code is four letters.', true); return; }
+  leaveRoom();
+  net = { role: 'guest', code, peer: null, conn: null };
+  netMsg('Looking for the game…');
+  const peer = new Peer({ config: ICE });
+  net.peer = peer;
+  peer.on('open', () => {
+    const conn = peer.connect(peerId(code), { reliable: true });
+    net.conn = conn;
+    conn.on('open', () => { lastNetMsg = ''; conn.send({ type: 'join', name: (prefs.names[0] || '').trim(), deck: prefs.decks[0] || '' }); });
+    conn.on('data', (msg) => guestMessage(msg));
+    conn.on('close', () => { if (net && net.role === 'guest') { toast('Lost the host.', true); leaveRoom(); newGame(); } });
+  });
+  peer.on('error', (e) => {
+    netMsg(e.type === 'peer-unavailable' ? `No game with the code ${code}.` : e.type === 'network' || e.type === 'server-error' ? 'Can\'t reach the matchmaking server. Check the connection and try again.' : `Connection problem: ${e.type}`, true);
+    leaveRoom(); render();
+  });
+}
+function sendResult(result) {
+  if (!net) return;
+  if (net.role === 'host') hostResult(0, result);
+  else if (net.conn) net.conn.send(Object.assign({ type: 'result' }, result));
+}
+// ----- host side
+function hostMessage(conn, msg) {
+  if (!R || !msg || typeof msg !== 'object') return;
+  if (msg.type === 'join') {
+    if (R.phase !== 'lobby') { conn.send({ type: 'refused', text: 'That game has already started.' }); return; }
+    if (R.players.length >= 4) { conn.send({ type: 'refused', text: 'That game is full.' }); return; }
+    const i = R.players.length;
+    R.players.push(newPlayer(i, String(msg.name || '').slice(0, 18), DECKS.includes(msg.deck) ? msg.deck : ''));
+    R.conns.push(conn);
+    broadcast();
+    return;
+  }
+  if (msg.type === 'result') { const i = R.conns.indexOf(conn); if (i >= 0) hostResult(i, msg); }
+}
+function hostStart() {
+  if (!R || R.players.length < 2) return;
+  random = Math.random;
+  S.difficulty = R.difficulty;
+  R.deck = buildDeck(R.mode, R.difficulty, R.words, R.players);
+  R.round = 0; R.phase = 'play'; R.reveal = null;
+  R.players.forEach((p) => { p.done = false; p.result = null; });
+  broadcast();
+}
+function hostResult(i, msg) {
+  if (!R || R.phase !== 'play' || msg.round !== R.round) return;
+  const p = R.players[i];
+  if (p.done) return;
+  p.done = true;
+  if (R.mode === 'relatives') p.result = Array.isArray(msg.plays) ? msg.plays.filter((g) => g && typeof g.word === 'string').slice(0, 200) : [];
+  else {
+    const pts = msg.right === true ? RIGHT : msg.right === false ? -WRONG : 0;
+    p.score += pts; p.rounds.push(pts);
+    if (msg.right === true) p.right += 1; else if (msg.right === false) p.wrong += 1;
+  }
+  hostCheckDone();
+  broadcast();
+}
+function hostCheckDone() {
+  if (!R || R.phase !== 'play' || R.players.some((p) => !p.done)) return;
+  if (R.mode === 'relatives') {
+    const card = R.deck[R.round];
+    const { found, deltas } = tally(card, R.players, (p) => p.result || []);
+    const plays = R.players.map((p) => p.result || []);
+    R.reveal = { card, found, deltas, plays };
+    R.phase = 'reveal';
+  } else R.phase = 'between';
+}
+function hostNext() {
+  if (!R || (R.phase !== 'reveal' && R.phase !== 'between')) return;
+  R.round += 1;
+  if (R.round >= R.words) R.phase = 'final';
+  else { R.phase = 'play'; R.reveal = null; R.players.forEach((p) => { p.done = false; p.result = null; }); }
+  broadcast();
+}
+function viewFor(i) {
+  const n = R.players.length;
+  const item = R.phase !== 'lobby' && R.mode !== 'relatives' ? R.deck[R.round * n + i] : null;
+  return {
+    type: 'view', code: R.code, phase: R.phase, mode: R.mode, difficulty: R.difficulty, seconds: R.seconds, total: R.words, round: R.round, me: i,
+    players: R.players.map((p) => ({ id: p.id, name: p.name, deck: p.deck, score: p.score, best: p.best, right: p.right, wrong: p.wrong, rounds: p.rounds, done: p.done, online: p.online })),
+    card: R.phase === 'lobby' ? null : R.mode === 'relatives' ? R.deck[Math.min(R.round, R.words - 1)] : item.card,
+    item, reveal: R.reveal,
+  };
+}
+function broadcast() {
+  if (!R) return;
+  R.players.forEach((p, i) => { const v = viewFor(i); if (i === 0) applyView(v); else if (R.conns[i] && R.conns[i].open) R.conns[i].send(v); });
+}
+// ----- guest side
+function guestMessage(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.type === 'refused') { netMsg(msg.text, true); leaveRoom(); render(); return; }
+  if (msg.type === 'view') applyView(msg);
+}
+// Both sides render from a view. A new round resets the local guesses and starts the clock.
+function applyView(v) {
+  const fresh = !S.online || S.online.round !== v.round || S.online.phase === 'lobby';
+  S.online = v; S.mode = v.mode; S.difficulty = v.difficulty; S.room = '';
+  S.players = v.players; S.turn = v.me; S.word = v.round; S.card = v.card; S.item = v.item;
+  const me = v.players[v.me];
+  if (v.phase === 'lobby') { S.phase = 'olobby'; deadline = null; render(); return; }
+  if (v.phase === 'play') {
+    if (fresh) { S.plays = []; S.plays[v.me] = []; S.verdict = null; S.done = false; started = Date.now(); deadline = started + v.seconds * 1000; }
+    if (me.done || S.done) { deadline = null; S.phase = v.mode === 'relatives' ? 'wait' : 'verdict'; if (!S.verdict) S.verdict = { choice: null, right: null, pts: 0 }; }
+    else S.phase = 'turn';
+    render();
+    if (fresh && S.phase === 'turn') { const inp = document.getElementById('guess'); if (inp) inp.focus(); }
+    return;
+  }
+  deadline = null;
+  if (v.phase === 'reveal') { S.history = [v.reveal]; S.phase = 'reveal'; if (fresh) sfx.reveal(); render(); return; }
+  if (v.phase === 'between') { S.phase = 'verdict'; if (!S.verdict) S.verdict = { choice: null, right: null, pts: 0 }; render(); return; }
+  if (v.phase === 'final') { S.phase = 'final'; render(); }
+}
+
 // The family as slots that fill in. Easy shows letter counts in file order; otherwise the slots are blank
 // and fill in the order you find them.
 function renderGuesses() {
@@ -446,12 +661,13 @@ function renderGuesses() {
 }
 function renderPlayers() {
   const el = document.getElementById('players');
-  if (S.phase === 'lobby') { el.innerHTML = ''; return; }
-  const cur = ['turn', 'pass', 'verdict'].includes(S.phase) ? S.turn : -1;
+  if (S.phase === 'lobby' || S.phase === 'olobby') { el.innerHTML = ''; return; }
+  const cur = ['turn', 'pass', 'verdict', 'wait'].includes(S.phase) ? S.turn : -1;
+  const tag = (p) => (S.online ? (p.id === S.turn ? '<span class="you">you</span>' : '') + (!p.online ? '<span class="you off">gone</span>' : p.done && S.phase !== 'reveal' && S.phase !== 'final' ? '<span class="you ok">done</span>' : '') : p.id === cur ? '<span class="you">up now</span>' : '');
   el.innerHTML = `<h3>Scores</h3>` + S.players.slice().sort((a, b) => b.score - a.score).map((p) => `
     <div class="player${p.id === cur ? ' current' : ''}">
       <div class="av" style="color:${colorOf(p.id)};border-color:${colorOf(p.id)}">${esc(initials(p.name))}</div>
-      <div class="nm">${esc(p.name)}${p.id === cur ? '<span class="you">up now</span>' : ''}</div>
+      <div class="nm">${esc(p.name)}${tag(p)}</div>
       <div class="sc">${p.score}</div>
     </div>`).join('');
 }

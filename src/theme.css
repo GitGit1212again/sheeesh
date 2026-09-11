@@ -198,3 +198,13 @@ button.story:hover { border-color: var(--neon); box-shadow: 0 0 14px rgba(255,63
 
 label.pname select.fav { margin-left: 8px; max-width: 200px; }
 @media (max-width: 640px) { label.pname { flex-wrap: wrap; } label.pname select.fav { margin-left: 0; width: 100%; } }
+.ways { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 10px 0; }
+.way { border: 1px solid #3a2b36; border-radius: 10px; padding: 12px 14px; background: #0e0912; }
+.way h3 { margin-top: 0; }
+.joinrow input { width: 120px; font-family: var(--mono); font-size: 22px; letter-spacing: .3em; text-transform: uppercase; text-align: center; padding: 8px 6px 8px 12px; border-radius: 8px; border: 1px solid #3a2b36; background: #120c17; color: var(--ink); }
+.bigcode { font-family: var(--mono); font-size: 64px; letter-spacing: .4em; color: #35e3ff; text-shadow: 0 0 18px rgba(53,227,255,.7); padding: 8px 0 8px .4em; text-align: center; }
+.slots4 .player.empty .av { border-style: dashed; opacity: .5; }
+.slots4 .player .nm small { display: block; font-size: 11px; color: var(--ink-dim); }
+.you.ok { color: #4dff88; }
+.you.off { color: #ff3fa4; }
+@media (max-width: 720px) { .ways { grid-template-columns: 1fr; } .bigcode { font-size: 44px; } }
